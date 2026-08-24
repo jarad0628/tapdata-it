@@ -11,6 +11,8 @@
 #   uses: tapdata/tapdata-it/.github/workflows/connector-it-reusable.yml@main
 # workflow_call 中 github 上下文自动继承调用方仓库（github.repository / github.sha / github.event 等），
 # 同一份 workflow 无需区分开源/闭源仓库。
+#
+# 运行环境：office-build 自托管 runner（需预装 git/jq/Maven/JDK17，可访问公司内网测试资源与私有 Nexus）
 name: Connector Integration Tests (Reusable)
 
 on:
@@ -39,7 +41,7 @@ on:
 jobs:
   # 分析提交内容：挑选被修改且含 IT 用例的 connector 模块，输出 JSON 数组驱动矩阵
   analyze:
-    runs-on: ubuntu-latest
+    runs-on: office-build
     outputs:
       connectors: ${{ steps.analyze.outputs.connectors }}
       has_changes: ${{ steps.analyze.outputs.has_changes }}
@@ -215,7 +217,7 @@ jobs:
     name: IT - ${{ matrix.connector }}
     needs: analyze
     if: needs.analyze.outputs.has_changes == 'true'
-    runs-on: ubuntu-latest
+    runs-on: office-build
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -248,6 +250,20 @@ jobs:
           if [[ -n "${{ secrets.MAVEN_SETTINGS }}" ]]; then
             mkdir -p "$HOME/.m2"
             echo "${{ secrets.MAVEN_SETTINGS }}" > "$HOME/.m2/settings.xml"
+          fi
+
+      # 第零步：预装 connectors-common 聚合 POM 声明的全部公共模块到本地仓库（-am 自动带上父 POM 与模块间依赖），
+      # 保证 connector 依赖链（-am）之外的公共模块也能从本地仓库解析，避免矩阵任务重复全量安装；
+      # 模块列表从 <modules> 声明提取而非扫描目录，避免未声明的游离目录（如 build/dist）破坏 -pl
+      - name: Install connectors-common modules (skip all tests)
+        shell: bash
+        run: |
+          if [[ -f connectors-common/pom.xml ]]; then
+            COMMON_MODULES="$(awk '/^[[:space:]]*<module>/{gsub(/.*<module>|<\/module>.*/, ""); print "connectors-common/"$0}' connectors-common/pom.xml | paste -sd, -)"
+            if [[ -n "${COMMON_MODULES}" ]]; then
+              mvn -B install -pl "connectors-common,${COMMON_MODULES}" -am \
+                -DskipITs=true -DskipTests -Dmaven.javadoc.skip=true -q
+            fi
           fi
 
       # 第一步：安装依赖链（-am 会带入 connectors-common 等依赖模块）但不执行任何测试，
