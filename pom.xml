@@ -1,0 +1,39 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>io.tapdata</groupId>
+    <artifactId>tapdata-it</artifactId>
+    <packaging>pom</packaging>
+    <name>TapData Integration Testing</name>
+    <url>https://tapdata.io</url>
+
+    <version>1.0-SNAPSHOT</version>
+
+    <properties>
+        <java.version>17</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- PDK API 版本：按 2.0.5 编译（mysql-connector 产品线版本），
+             仅调用 2.0.5 已有的 API，保证运行时兼容任意更高版本环境 -->
+        <tapdata.pdk.api.version>2.0.5-SNAPSHOT</tapdata.pdk.api.version>
+        <junit.version>5.9.2</junit.version>
+        <jackson.version>2.18.3</jackson.version>
+    </properties>
+
+    <modules>
+        <module>tapdata-connector-it</module>
+    </modules>
+
+    <distributionManagement>
+        <repository>
+            <id>nexus-tapdata-net</id>
+            <name>Nexus Release Repository</name>
+            <url>https://nexus.tapdata.net/repository/maven-public/</url>
+        </repository>
+        <snapshotRepository>
+            <id>nexus-tapdata-net</id>
+            <name>Nexus Snapshot Repository</name>
+            <url>https://nexus.tapdata.net/repository/maven-snapshots/</url>
+        </snapshotRepository>
+    </distributionManagement>
+</project>

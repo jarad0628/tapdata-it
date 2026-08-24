@@ -1,0 +1,8 @@
+./docs/report
+**/*.log
+**/target/
+
+.idea/
+*.iws
+*.iml
+*.ipr

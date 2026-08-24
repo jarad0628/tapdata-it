@@ -1,0 +1,297 @@
+# 可复用 Connector 集成测试 workflow（维护于 tapdata-it 仓库）
+#
+# 由 tapdata-connectors（开源）与 tapdata-connectors-enterprise（闭源）通过 workflow_call 触发：
+# 1. 自动分析本次提交/PR 变更的文件，映射到 Maven 模块，仅挑选"被修改且含集成测试（src/it/java）"
+#    的 connector 模块（变更左移，避免全量执行）。
+# 2. 对每个选中的模块执行 maven-failsafe 集成测试（跳过 surefire 单测，规避 Byte Buddy/JDK 兼容问题）。
+# 3. 将 target/failsafe-reports 打包上传为 artifacts，命名包含仓库 owner、模块与 commit SHA，
+#    与当前提交/PR 关联。
+#
+# 引用方式（两个 connector 仓库的 connector-it.yml）：
+#   uses: tapdata/tapdata-it/.github/workflows/connector-it-reusable.yml@main
+# workflow_call 中 github 上下文自动继承调用方仓库（github.repository / github.sha / github.event 等），
+# 同一份 workflow 无需区分开源/闭源仓库。
+name: Connector Integration Tests (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      java_version:
+        description: 'JDK 版本，用于编译与运行集成测试'
+        required: false
+        type: string
+        default: '17'
+      common_changed_strategy:
+        description: 'connectors-common 变更时的执行策略：all（运行全部有 IT 的 connector，保守）或 affected（仅运行依赖变更 common 模块的 connector）'
+        required: false
+        type: string
+        default: 'all'
+      connectors_override:
+        description: '手工指定模块列表（逗号分隔的模块相对路径），跳过 diff 分析；用于 workflow_dispatch 调试'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      MAVEN_SETTINGS:
+        description: '可选：私有 Nexus 需要认证时注入的 ~/.m2/settings.xml 内容'
+        required: false
+
+jobs:
+  # 分析提交内容：挑选被修改且含 IT 用例的 connector 模块，输出 JSON 数组驱动矩阵
+  analyze:
+    runs-on: ubuntu-latest
+    outputs:
+      connectors: ${{ steps.analyze.outputs.connectors }}
+      has_changes: ${{ steps.analyze.outputs.has_changes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Analyze changed connectors
+        id: analyze
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'echo "analyze failed at line ${LINENO}"' ERR
+
+          # 所有数组与标志位在顶层声明，避免分支内 declare 的作用域问题
+          declare -A CHANGED_MODULES=()
+          declare -A RESULT=()
+          ALL_MODULES=false
+          COMMON_CHANGED=false
+
+          # ---------- 1. 手工指定模块（workflow_dispatch 调试） ----------
+          OVERRIDE="${{ inputs.connectors_override }}"
+          if [[ -n "${OVERRIDE}" ]]; then
+            IFS=',' read -ra TMP <<< "${OVERRIDE}"
+            for m in "${TMP[@]}"; do
+              m=$(echo "$m" | xargs)
+              if [[ -n "$m" && -f "$m/pom.xml" ]]; then
+                RESULT["$m"]=1
+              fi
+            done
+          else
+            # ---------- 2. 计算本次变更的文件列表 ----------
+            CHANGED_FILES=""
+            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+              BASE_REF="${{ github.event.pull_request.base.ref }}"
+              if [[ ! "${BASE_REF}" =~ ^[A-Za-z0-9_./-]+$ ]]; then
+                echo "Invalid base ref: ${BASE_REF}"
+                exit 1
+              fi
+              git fetch origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+              CHANGED_FILES=$(git diff --name-only "origin/${BASE_REF}...HEAD" || true)
+            else
+              BEFORE="${{ github.event.before }}"
+              if [[ -n "${BEFORE}" && ! "${BEFORE}" =~ ^[0-9a-f]{40}$ && ! "${BEFORE}" =~ ^0+$ ]]; then
+                echo "Invalid before sha: ${BEFORE}"
+                exit 1
+              fi
+              if [[ -z "${BEFORE}" || "${BEFORE}" =~ ^0+$ ]]; then
+                # 新分支首次推送（或无 before 上下文）：取本次 HEAD 提交涉及的文件
+                CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r HEAD || true)
+              else
+                CHANGED_FILES=$(git diff --name-only "${BEFORE}...HEAD" || true)
+              fi
+            fi
+            echo "=== Changed files ==="
+            echo "${CHANGED_FILES}"
+
+            # ---------- 3. 变更文件 → Maven 模块映射 ----------
+            while IFS= read -r f; do
+              if [[ -z "$f" ]]; then
+                continue
+              fi
+              case "$f" in
+                pom.xml | connectors/pom.xml | connectors-common/pom.xml | connectors-javascript/pom.xml | file-storages/pom.xml)
+                  # 聚合 POM 变更影响全部子模块，保守全量（必须在模块模式之前匹配）
+                  ALL_MODULES=true
+                  ;;
+                connectors/* | connectors-common/* | connectors-javascript/* | file-storages/*)
+                  m=$(echo "$f" | cut -d/ -f1-2)
+                  if [[ -f "$m/pom.xml" ]]; then
+                    CHANGED_MODULES["$m"]=1
+                    if [[ "$m" == connectors-common/* ]]; then
+                      COMMON_CHANGED=true
+                    fi
+                  fi
+                  ;;
+              esac
+            done <<< "${CHANGED_FILES}"
+          fi
+
+          # ---------- 4. 收集含 IT 用例的候选模块 ----------
+          collect_candidates() {
+            local top d m
+            for top in connectors connectors-javascript; do
+              [[ -d "$top" ]] || continue
+              for d in "$top"/*/; do
+                [[ -d "$d" ]] || continue
+                m="${d%/}"
+                if [[ -f "$m/pom.xml" && -d "$m/src/it/java" ]]; then
+                  echo "$m"
+                fi
+              done
+            done
+            if [[ -d connectors-common ]]; then
+              for d in connectors-common/*/; do
+                [[ -d "$d" ]] || continue
+                m="${d%/}"
+                if [[ -f "$m/pom.xml" && -d "$m/src/it/java" ]]; then
+                  echo "$m"
+                fi
+              done
+            fi
+          }
+
+          # ---------- 5. 决策：确定本次需要执行 IT 的模块 ----------
+          if [[ "${ALL_MODULES}" == "true" ]]; then
+            while read -r m; do
+              if [[ -n "$m" ]]; then
+                RESULT["$m"]=1
+              fi
+            done < <(collect_candidates)
+          elif [[ "${COMMON_CHANGED}" == "true" ]]; then
+            if [[ "${{ inputs.common_changed_strategy }}" == "affected" ]]; then
+              # 精确模式：直接修改的模块 + 通过 pom.xml 依赖分析圈定受影响 connector
+              for m in "${!CHANGED_MODULES[@]}"; do
+                if [[ "$m" == connectors-common/* ]]; then
+                  aid=$(awk '/<parent>/{p=1} /<\/parent>/{p=0} !p && /<artifactId>/{gsub(/.*<artifactId>|<\/artifactId>.*/, ""); print; exit}' "$m/pom.xml")
+                  if [[ -z "$aid" ]]; then
+                    aid=$(basename "$m")
+                  fi
+                  for c in connectors/*/pom.xml connectors-javascript/*/pom.xml; do
+                    if [[ ! -f "$c" ]]; then
+                      continue
+                    fi
+                    if grep -q "<artifactId>${aid}</artifactId>" "$c"; then
+                      cm="${c%/pom.xml}"
+                      if [[ -d "$cm/src/it/java" ]]; then
+                        RESULT["$cm"]=1
+                      fi
+                    fi
+                  done
+                else
+                  if [[ -d "$m/src/it/java" ]]; then
+                    RESULT["$m"]=1
+                  fi
+                fi
+              done
+            else
+              # 保守模式：common 变更影响面不确定，运行全部有 IT 的模块
+              while read -r m; do
+                if [[ -n "$m" ]]; then
+                  RESULT["$m"]=1
+                fi
+              done < <(collect_candidates)
+            fi
+          else
+            # 常规：仅运行被修改且含 IT 的模块
+            for m in "${!CHANGED_MODULES[@]}"; do
+              if [[ -d "$m/src/it/java" ]]; then
+                RESULT["$m"]=1
+              fi
+            done
+          fi
+
+          # ---------- 6. 输出 JSON 模块列表 ----------
+          RESULT_JSON="[]"
+          if [[ ${#RESULT[@]} -gt 0 ]]; then
+            RESULT_JSON=$(printf '%s\n' "${!RESULT[@]}" | sort -u | jq -R . | jq -s -c .)
+          fi
+          echo "connectors=${RESULT_JSON}" >> "$GITHUB_OUTPUT"
+          if [[ "${RESULT_JSON}" == "[]" ]]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "=== Selected modules for IT ==="
+          echo "${RESULT_JSON}"
+
+  # 矩阵执行：每个被修改的 connector 独立跑集成测试
+  test:
+    name: IT - ${{ matrix.connector }}
+    needs: analyze
+    if: needs.analyze.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        connector: ${{ fromJson(needs.analyze.outputs.connectors) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute connector short name
+        id: name
+        shell: bash
+        run: |
+          SAFE="$(echo '${{ matrix.connector }}' | tr '/' '-')"
+          echo "safe=${SAFE}" >> "$GITHUB_OUTPUT"
+          echo "label=${SAFE}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+          cache: maven
+
+      - name: Configure Maven settings
+        shell: bash
+        run: |
+          if [[ -n "${{ secrets.MAVEN_SETTINGS }}" ]]; then
+            mkdir -p "$HOME/.m2"
+            echo "${{ secrets.MAVEN_SETTINGS }}" > "$HOME/.m2/settings.xml"
+          fi
+
+      # 第一步：安装依赖链（-am 会带入 connectors-common 等依赖模块）但不执行任何测试，
+      # 防止公共模块自身的 IT 被连带执行
+      - name: Install dependency chain (skip all tests)
+        shell: bash
+        run: |
+          mvn -B install -pl "${{ matrix.connector }}" -am \
+            -DskipITs=true -DskipTests -Dmaven.javadoc.skip=true -q
+
+      # 第二步：仅目标模块执行 failsafe 集成测试。
+      # test-compile 触发 build-helper 将 src/it/java 加入测试源码并编译；
+      # 直接调用 failsafe goals 而非 verify，确保 surefire 单测完全不执行
+      # （规避 JDK 17+/Byte Buddy 兼容问题，与本地实践一致）；
+      # -DskipITs=false 覆盖各 connector pom 中默认的 skipITs=true
+      - name: Run integration tests
+        shell: bash
+        run: |
+          cd "${{ matrix.connector }}"
+          mvn -B test-compile failsafe:integration-test failsafe:verify -DskipITs=false
+
+      # 报告打包上传（失败也上传），artifact 名称关联仓库 owner、模块与 commit SHA
+      - name: Upload failsafe reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failsafe-reports-${{ github.repository_owner }}-${{ steps.name.outputs.safe }}-${{ github.sha }}
+          path: |
+            ${{ matrix.connector }}/target/failsafe-reports/**
+            ${{ matrix.connector }}/target/surefire-reports/**
+          if-no-files-found: ignore
+
+      # job summary 输出模块、事件、PR 号与 commit 关联信息
+      - name: Summarize results
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## IT results: \`${{ matrix.connector }}\`"
+            echo ""
+            echo "- 事件: ${{ github.event_name }}"
+            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+              echo "- PR: #${{ github.event.pull_request.number }}"
+            fi
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- Artifact: \`failsafe-reports-${{ github.repository_owner }}-${{ steps.name.outputs.safe }}-${{ github.sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
