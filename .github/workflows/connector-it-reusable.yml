@@ -41,7 +41,7 @@ on:
 jobs:
   # 分析提交内容：挑选被修改且含 IT 用例的 connector 模块，输出 JSON 数组驱动矩阵
   analyze:
-    runs-on: office-build
+    # runs-on: office-build
     outputs:
       connectors: ${{ steps.analyze.outputs.connectors }}
       has_changes: ${{ steps.analyze.outputs.has_changes }}
@@ -217,7 +217,7 @@ jobs:
     name: IT - ${{ matrix.connector }}
     needs: analyze
     if: needs.analyze.outputs.has_changes == 'true'
-    runs-on: office-build
+    # runs-on: office-build
     timeout-minutes: 90
     strategy:
       fail-fast: false
