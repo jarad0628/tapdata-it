@@ -1,15 +1,31 @@
 package io.tapdata.it.mapping;
 
+import io.tapdata.entity.schema.type.TapArray;
+import io.tapdata.entity.schema.type.TapBinary;
+import io.tapdata.entity.schema.type.TapBoolean;
+import io.tapdata.entity.schema.type.TapDate;
+import io.tapdata.entity.schema.type.TapDateTime;
+import io.tapdata.entity.schema.type.TapJson;
+import io.tapdata.entity.schema.type.TapMap;
+import io.tapdata.entity.schema.type.TapNumber;
+import io.tapdata.entity.schema.type.TapRaw;
+import io.tapdata.entity.schema.type.TapString;
+import io.tapdata.entity.schema.type.TapTime;
+import io.tapdata.entity.schema.type.TapType;
+import io.tapdata.entity.schema.type.TapYear;
 import io.tapdata.entity.schema.value.TapArrayValue;
 import io.tapdata.entity.schema.value.TapBinaryValue;
 import io.tapdata.entity.schema.value.TapBooleanValue;
 import io.tapdata.entity.schema.value.TapDateValue;
 import io.tapdata.entity.schema.value.TapDateTimeValue;
+import io.tapdata.entity.schema.value.TapJsonValue;
 import io.tapdata.entity.schema.value.TapMapValue;
 import io.tapdata.entity.schema.value.TapNumberValue;
 import io.tapdata.entity.schema.value.TapRawValue;
 import io.tapdata.entity.schema.value.TapStringValue;
+import io.tapdata.entity.schema.value.TapTimeValue;
 import io.tapdata.entity.schema.value.TapValue;
+import io.tapdata.entity.schema.value.TapYearValue;
 import io.tapdata.it.schema.TestDataType;
 
 import java.util.Arrays;
@@ -126,6 +142,78 @@ public final class TapValueClassResolver {
             default:
                 return expectedClassesForGenerated(type);
         }
+    }
+
+    /**
+     * 按 spec.json dataTypes 解析出的 TapType 推导读回值 wrap 后的期望 TapValue 类集合（spec 声明驱动）。
+     * <p>
+     * 与 {@link #expectedClassesForReadBack(TestDataType)} 的区别：断言依据不是测试框架的 TestDataType 枚举，
+     * 而是连接器 spec.json dataTypes 声明的方言规则（{@code TapTypeResolver.resolve(dataType)} 解析结果，
+     * 与引擎 TableFieldTypesGenerator.autoFill 同源）。TapType 族 → 期望 TapValue 类：
+     * <ul>
+     *   <li>TapString/TapNumber/TapBoolean → 引擎默认不包装（保持原值）；连接器注册自定义 codec 后包装结果应属该类族；</li>
+     *   <li>TapDate/TapDateTime/TapTime/TapYear → 读回时间值被专用 codec 识别（TapDateValue/TapDateTimeValue/
+     *       TapTimeValue/TapYearValue），字符串/原始值兜底；</li>
+     *   <li>TapBinary/TapMap/TapArray → 专用 codec 稳定包装。</li>
+     * </ul>
+     */
+    public static Set<Class<? extends TapValue<?, ?>>> expectedClassesForTapType(TapType tapType) {
+        if (tapType instanceof TapString) {
+            return classes(TapStringValue.class);
+        }
+        if (tapType instanceof TapNumber) {
+            return classes(TapNumberValue.class, TapRawValue.class);
+        }
+        if (tapType instanceof TapBoolean) {
+            // 部分库 boolean 以 tinyint(1)/bit 承载，读回 Integer → 引擎不包装；
+            // 连接器注册 Boolean/Number codec 时合法包装类为 TapBooleanValue/TapNumberValue
+            return classes(TapBooleanValue.class, TapNumberValue.class, TapRawValue.class);
+        }
+        if (tapType instanceof TapDate) {
+            return classes(TapDateValue.class, TapDateTimeValue.class, TapStringValue.class, TapRawValue.class);
+        }
+        if (tapType instanceof TapDateTime) {
+            return classes(TapDateTimeValue.class, TapDateValue.class, TapStringValue.class, TapRawValue.class);
+        }
+        if (tapType instanceof TapTime) {
+            return classes(TapTimeValue.class, TapStringValue.class, TapRawValue.class);
+        }
+        if (tapType instanceof TapYear) {
+            return classes(TapYearValue.class, TapStringValue.class, TapRawValue.class);
+        }
+        if (tapType instanceof TapBinary) {
+            return classes(TapBinaryValue.class);
+        }
+        if (tapType instanceof TapMap) {
+            return classes(TapMapValue.class);
+        }
+        if (tapType instanceof TapArray) {
+            return classes(TapArrayValue.class);
+        }
+        if (tapType instanceof TapJson) {
+            return classes(TapJsonValue.class, TapMapValue.class, TapStringValue.class, TapRawValue.class);
+        }
+        if (tapType instanceof TapRaw) {
+            return classes(TapRawValue.class);
+        }
+        return classes(TapRawValue.class);
+    }
+
+    /**
+     * 按 spec.json 解析出的 TapType 族判定引擎默认 wrap 契约：
+     * 有专用 codec 的类型族（DATE/DATETIME/TIME/YEAR/BINARY/MAP/ARRAY）应被包装为 TapValue，
+     * 其余（STRING/NUMBER/BOOLEAN/JSON）引擎不包装、保持原值。
+     */
+    public static boolean wrapsByTapType(TapType tapType) {
+        if (tapType == null) {
+            return false;
+        }
+        if (tapType instanceof TapDate || tapType instanceof TapDateTime || tapType instanceof TapTime
+                || tapType instanceof TapYear || tapType instanceof TapBinary
+                || tapType instanceof TapMap || tapType instanceof TapArray) {
+            return true;
+        }
+        return false;
     }
 
     @SafeVarargs

@@ -1,0 +1,63 @@
+version: "3"
+# 组织级自托管 runner（tapdata org），供 tapdata-connectors / tapdata-connectors-enterprise
+# 通过 workflow_call 调度（label: tapdata-it）。
+# 前置要求：
+#  1. ACCESS_TOKEN 必须为 org admin 的 classic PAT（admin:org）或 fine-grained PAT
+#     （授予 Self-hosted runners: Read and write）；普通 PAT 即使带 admin:org 也会 403
+#  2. 注册成功后，在组织 Settings -> Actions -> Runners 中确认 Repository access
+#     已勾选 tapdata-connectors / tapdata-connectors-enterprise
+#  3. RUNNER_TOKEN 只接受一次性注册 token（A 开头），不可填 PAT；留空即可（用 ACCESS_TOKEN 注册）
+#
+# 多副本隔离策略：
+#  - GitHub 要求每个 runner 使用独立的 work 目录，且多 runner 并发写同一 .m2 会竞争；
+#    因此每副本使用独立目录（runner-work-N / m2-N），不支持 docker compose --scale 共享挂载
+#  - settings.xml / docker.sock / ssh key 为只读共享，无冲突
+#  - RANDOM_RUNNER_SUFFIX=true 保证 GitHub 侧 runner 名称不冲突；
+#    如需新增副本，复制一个 service 并递增目录后缀即可
+x-runner-common: &runner-common
+  image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.11
+  restart: always
+  privileged: true
+  extra_hosts:
+    - "fileserver.tapdata.net:192.168.1.184"
+    - "buildserver.tapdata.io:192.168.1.170"
+    - "nexus.tapdata.net:192.168.1.184"
+  environment:
+    - RUN_AS_ROOT=true
+    - ACCESS_TOKEN=<replace real access token>
+    - RUNNER_SCOPE=org
+    - RANDOM_RUNNER_SUFFIX=true
+    - RUNNER_GROUP=tapdata-it-runners
+    - ORG_NAME=tapdata
+    - LABELS=tapdata-it
+    # - RUNNER_TOKEN=...（一次性注册 token，非 PAT）
+    # - REPO_URL=https://github.com/tapdata（仓库级才需要，组织级不要设）
+    - RUNNER_NAME_PREFIX=tapdata-it
+    - DISABLE_AUTO_UPDATE=1
+  deploy:
+    resources:
+      limits:
+        cpus: "4"
+        memory: 12G
+      reservations:
+        cpus: "2"
+        memory: 4G
+
+services:
+  runner-it-1:
+    <<: *runner-common
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - /ssd/app/runner-it/runner-1/work:/_work
+      - /ssd/app/runner-it/runner-1/m2:/root/.m2
+      - ./root_id_ed25519_proxy_server_key:/root/.ssh/root_id_ed25519_proxy_server_key
+      - ./config:/root/.ssh/config
+
+  runner-it-2:
+    <<: *runner-common
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - /ssd/app/runner-it/runner-2/work:/_work
+      - /ssd/app/runner-it/runner-2/m2:/root/.m2
+      - ./root_id_ed25519_proxy_server_key:/root/.ssh/root_id_ed25519_proxy_server_key
+      - ./config:/root/.ssh/config

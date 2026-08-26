@@ -382,6 +382,16 @@ public abstract class ConnectorIT {
         return TapValueClassResolver.expectedClassesForReadBack(type);
     }
 
+    /** 子类可覆写：按 spec.json dataTypes 解析出的 TapType 推导读回值 wrap 后的期望 TapValue 类集合（U10 spec 声明驱动） */
+    protected Set<Class<? extends TapValue<?, ?>>> expectedTapValueClassesForTapType(TapType tapType) {
+        return TapValueClassResolver.expectedClassesForTapType(tapType);
+    }
+
+    /** 子类可覆写：按 spec.json 解析出的 TapType 族判定引擎是否应包装为 TapValue（U10 用，默认按专用 codec 契约） */
+    protected boolean wrapsByTapType(TapType tapType) {
+        return TapValueClassResolver.wrapsByTapType(tapType);
+    }
+
     /** 子类可覆写：连接器特有的特殊值样本（如 MongoDB ObjectId/Binary/Decimal128），默认无 */
     protected Map<String, Object> specialValueSamples() {
         return Collections.emptyMap();
@@ -777,6 +787,12 @@ public abstract class ConnectorIT {
                 log(context, "[IT] dropResidualTables (bypass) done in {} ms, table: {}", elapsed(start), spec.getTableName());
             } catch (Throwable t) {
                 log(context, "[IT] dropResidualTables (bypass) ignored failure: {} ({} ms)", t.getMessage(), elapsed(start));
+            }
+            // 兜底清理外键用例辅助父表（_tap_it_fkp_*）：用例准备/断言异常时 finally 可能未覆盖，
+            // tearDown 按前缀批量清理，避免外键父表残留污染测试库（dropTable 只感知子表）
+            try {
+                verifier().dropTablesByPrefix(FOREIGN_KEY_PARENT_PREFIX);
+            } catch (Throwable ignored) {
             }
             return;
         }
@@ -1454,6 +1470,13 @@ public abstract class ConnectorIT {
                 .add(new TapConstraintMapping().foreignKey("c_int").referenceKey("c_int"));
     }
 
+    /** 外键约束：子表 c_bigint → 父表 id（bigint ↔ bigint 类型匹配，MySQL/PostgreSQL/Oracle 通用） */
+    private TapConstraint testForeignKeyConstraint(String parentTable) {
+        return new TapConstraint("fk_c_bigint", TapConstraint.ConstraintType.FOREIGN_KEY)
+                .referencesTable(parentTable)
+                .add(new TapConstraintMapping().foreignKey("c_bigint").referenceKey("id"));
+    }
+
     @Test
     @UnderTest(value = "createIndex", requiresVerifier = true)
     void should_create_index() throws Throwable {
@@ -1540,6 +1563,117 @@ public abstract class ConnectorIT {
         // 旁路 listConstraints 验证删除真实生效（不经过 connector queryConstraints，避免自洽）
         assertFalse(verifier().listConstraints(spec.getTableName()).contains("uq_c_int"),
                 "bypass check: constraint uq_c_int should be removed");
+    }
+
+    /** 外键用例辅助父表名前缀（tearDown 兜底清理锚点，见 {@link #dropResidualTables()}） */
+    private static final String FOREIGN_KEY_PARENT_PREFIX = "_tap_it_fkp_";
+
+    /**
+     * 外键用例公共准备：旁路创建子表（当前 spec 表）与父表（id bigint 主键，写入 id=1..N），
+     * 子表 c_bigint 覆写为 1..N 保证每条引用命中父表 id，避免外键完整性校验失败，
+     * 全程不经过 connector 任何能力。
+     *
+     * @return 父表名（随机生成，用例结束需 {@link #dropForeignKeyAuxTable(String)} 清理）
+     */
+    private String prepareForeignKeyData() throws Throwable {
+        String parentTable = TestTableSpec.randomTableName(FOREIGN_KEY_PARENT_PREFIX);
+        int count = defaultRecordCount();
+        // 子表：与 prepareData 一致先建表再旁路写入（不经过 connector createTableV2）
+        createTableIfNeeded();
+        verifier().createTable(parentTable, List.of(TestFieldSpec.builder()
+                .name("id").dataType("bigint").testDataType(TestDataType.BIGINT).primaryKey(true).build()));
+        List<Map<String, Object>> parentRows = new ArrayList<>(count);
+        for (int i = 1; i <= count; i++) {
+            parentRows.add(Collections.singletonMap("id", (Object) (long) i));
+        }
+        verifier().insert(parentTable, parentRows);
+        List<Map<String, Object>> rows = beforeWrite(generateRows(count));
+        for (int i = 0; i < rows.size(); i++) {
+            rows.get(i).put("c_bigint", (long) (i + 1));
+        }
+        bypassInsert(rows);
+        return parentTable;
+    }
+
+    /**
+     * 外键用例兜底清理：先删引用方（子表，tearDown 再删一次亦无害）再删父表，
+     * 避免残留外键阻塞删表（tearDown 的 dropResidualTables 不感知父表）。
+     */
+    private void dropForeignKeyAuxTable(String parentTable) {
+        if (verifier() == null || parentTable == null) {
+            return;
+        }
+        try {
+            verifier().dropTable(spec.getTableName());
+        } catch (Throwable ignored) {
+        }
+        try {
+            verifier().dropTable(parentTable);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @Test
+    @UnderTest(value = "createConstraint", requiresVerifier = true)
+    void should_create_foreign_key_constraint() throws Throwable {
+        CreateConstraintFunction createConstraint = require(functions()::getCreateConstraintFunction, "createConstraint");
+        String parentTable = null;
+        try {
+            parentTable = prepareForeignKeyData();
+            createConstraint.createConstraint(nodeContext(), buildTapTable(),
+                    new TapCreateConstraintEvent().constraintList(List.of(testForeignKeyConstraint(parentTable))), true);
+            // 旁路 listConstraints 验证外键真实创建（事实来源 = 对端库，不依赖 connector queryConstraints）
+            assertTrue(verifier().listConstraints(spec.getTableName()).contains("fk_c_bigint"),
+                    "bypass check: foreign key fk_c_bigint should exist after createConstraint");
+        } finally {
+            dropForeignKeyAuxTable(parentTable);
+        }
+    }
+
+    @Test
+    @UnderTest(value = "queryConstraints", requiresVerifier = true)
+    void should_query_foreign_key_constraints() throws Throwable {
+        QueryConstraintsFunction queryConstraints = require(functions()::getQueryConstraintsFunction, "queryConstraints");
+        String parentTable = null;
+        try {
+            parentTable = prepareForeignKeyData();
+            // 外键准备走旁路直连（不经过 connector createConstraint）
+            verifier().createForeignKeyConstraint(spec.getTableName(), "fk_c_bigint", "c_bigint", parentTable, "id");
+            assertTrue(verifier().listConstraints(spec.getTableName()).contains("fk_c_bigint"),
+                    "bypass check: prepared foreign key should exist");
+            TapTable table = buildTapTable();
+            List<TapConstraint> constraints = new ArrayList<>();
+            queryConstraints.query(nodeContext(), table, constraints::addAll);
+            final String refParentTable = parentTable;
+            assertTrue(constraints.stream().anyMatch(c -> "fk_c_bigint".equals(c.getName())
+                            && TapConstraint.ConstraintType.FOREIGN_KEY == c.getType()
+                            && refParentTable.equals(c.getReferencesTableName())),
+                    "foreign key fk_c_bigint should be visible with references " + parentTable + ", got: " + constraints);
+        } finally {
+            dropForeignKeyAuxTable(parentTable);
+        }
+    }
+
+    @Test
+    @UnderTest(value = "dropConstraint", requiresVerifier = true)
+    void should_drop_foreign_key_constraint() throws Throwable {
+        DropConstraintFunction dropConstraint = require(functions()::getDropConstraintFunction, "dropConstraint");
+        String parentTable = null;
+        try {
+            parentTable = prepareForeignKeyData();
+            // 外键准备走旁路直连（不经过 connector createConstraint）
+            verifier().createForeignKeyConstraint(spec.getTableName(), "fk_c_bigint", "c_bigint", parentTable, "id");
+            assertTrue(verifier().listConstraints(spec.getTableName()).contains("fk_c_bigint"),
+                    "bypass check: prepared foreign key should exist");
+            TapTable table = buildTapTable();
+            dropConstraint.dropConstraint(nodeContext(), table,
+                    new TapDropConstraintEvent().constraintList(List.of(testForeignKeyConstraint(parentTable))));
+            // 旁路 listConstraints 验证删除真实生效（不经过 connector queryConstraints，避免自洽）
+            assertFalse(verifier().listConstraints(spec.getTableName()).contains("fk_c_bigint"),
+                    "bypass check: foreign key fk_c_bigint should be removed");
+        } finally {
+            dropForeignKeyAuxTable(parentTable);
+        }
     }
 
     // ===================== E. 字段级 DDL =====================
@@ -2090,10 +2224,11 @@ public abstract class ConnectorIT {
     // ===================== K. TapValue 转换契约（引擎 wrap/unwrap 语义） =====================
 
     /**
-     * 转换契约用例（U1~U9）：验证引擎 Connector 边界的数据类型转换语义。
+     * 转换契约用例（U1~U10）：验证引擎 Connector 边界的数据类型转换语义。
      * wrap = 普通值 → TapValue（transformToTapValueMap），unwrap = TapValue → 普通值（transformFromTapValueMap），
      * 均复用 connector registerCapabilities 的 codecRegistry，与引擎 TaskNodePdkConnector 边界行为一致。
-     * 除 U5 标注 @UnderTest("writeRecord") 外，其余用例不标注：验证的是 codec 转换契约而非 Connector 能力接口。
+     * U5 标注 @UnderTest("writeRecord")（写侧引擎 codec 路径），U10 标注 @UnderTest("batchRead")
+     * （经库读回 → 统一转换 → spec 声明断言），其余用例不标注：验证的是 codec 转换契约而非 Connector 能力接口。
      */
     @Test
     void should_wrap_generated_values_to_tap_value() throws Throwable {
@@ -2403,6 +2538,52 @@ public abstract class ConnectorIT {
         Map<String, Object> unwrapped = unwrapRow(wrapped);
         TapValueAssert.assertNestedEquals(mapExpected, parseJsonIfNeeded(unwrapped.get("c_map")), "c_map");
         TapValueAssert.assertNestedEquals(arrayExpected, parseJsonIfNeeded(unwrapped.get("c_array")), "c_array");
+    }
+
+    @Test
+    @UnderTest(value = "batchRead", requiresVerifier = true)
+    void should_validate_wrap_types_against_spec_through_database() throws Throwable {
+        // U10：经库全链路 spec 契约验证 —— 生成数据旁路直连写入（不经 connector writeRecord，
+        // 规避写侧 codec 缺陷干扰读侧验证），batchRead 读回后经 codecsFilterManager 统一转换，
+        // 断言各字段转换结果类型族符合 connector spec.json dataTypes 声明的规则
+        // （以 discoverSchema 返回的方言 dataType 为解析键，与引擎 TableFieldTypesGenerator.autoFill 同源；
+        // spec 未声明的字段类型直接失败暴露缺口）
+        assumeTrue(engineCodecsFilterManager != null, "no codec registry, skip.");
+        prepareData(defaultRecordCount());
+        TapTable table = buildTapTable();
+        // 数据库真实 schema：字段方言 dataType 是 spec.json 声明解析的事实来源（discover 返回真实方言）
+        TapTable discovered = discoverTable();
+        assertNotNull(discovered, "discoverSchema should return the created table");
+        List<Map<String, Object>> readBack = batchReadAll(table);
+        assertFalse(readBack.isEmpty(), "batchRead should return inserted rows");
+        Map<String, TapField> discoveredFields = discovered.getNameFieldMap();
+        for (Map<String, Object> row : readBack) {
+            Map<String, Object> wrapped = wrapRow(row, table);
+            for (TestFieldSpec field : spec.getFields()) {
+                String name = field.getName();
+                Object plain = row.get(name);
+                if (plain == null) {
+                    continue;
+                }
+                TapField discoveredField = discoveredFields.get(name);
+                assertNotNull(discoveredField, "field[" + name + "] should be present in discovered schema");
+                // spec.json 声明规则：方言 dataType → TapType（spec 未声明 → 失败，暴露 spec 缺口）
+                TapType declaredTapType = typeResolver.resolve(discoveredField.getDataType());
+                assertNotNull(declaredTapType,
+                        "field[" + name + "] dataType '" + discoveredField.getDataType()
+                                + "' is not declared in connector spec.json");
+                Object wrappedValue = wrapped.get(name);
+                if (wrappedValue instanceof TapValue) {
+                    TapValueAssert.assertValueClass(field.getTestDataType(), (TapValue<?, ?>) wrappedValue,
+                            expectedTapValueClassesForTapType(declaredTapType), name);
+                    TapValueAssert.assertValueEquals(field.getTestDataType(), plain, (TapValue<?, ?>) wrappedValue, name);
+                } else {
+                    assertFalse(wrapsByTapType(declaredTapType),
+                            "field[" + name + "] should be wrapped into TapValue for spec type "
+                                    + declaredTapType.getClass().getSimpleName());
+                }
+            }
+        }
     }
 
     // ===================== J. 能力覆盖校验（原则 3：声明式能力） =====================

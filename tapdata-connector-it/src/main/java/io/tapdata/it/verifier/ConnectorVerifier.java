@@ -96,6 +96,30 @@ public interface ConnectorVerifier {
      */
     void createConstraint(String table, String constraintName, String column) throws Exception;
 
+    /**
+     * 直连对端数据源建外键约束（旁路准备，不经过 Connector 的 createConstraint）。
+     * 无约束概念的数据源（MongoDB）为空操作。
+     *
+     * @param table           引用方表名
+     * @param constraintName  外键约束名
+     * @param column          外键列名
+     * @param referencesTable 被引用表名
+     * @param referencesColumn 被引用列名
+     */
+    void createForeignKeyConstraint(String table, String constraintName, String column,
+                                    String referencesTable, String referencesColumn) throws Exception;
+
+    /**
+     * 直连对端数据源按表名前缀批量删表（旁路兜底清理，不经过 Connector 的 dropTable）。
+     * 用于清理外键用例辅助父表等 tearDown 感知不到的外部残留表；无表概念的
+     * 数据源（MongoDB）为空操作。
+     *
+     * @param prefix 表名前缀（如 {@code _tap_it_fkp_}），仅删除以该前缀开头的表
+     */
+    default void dropTablesByPrefix(String prefix) throws Exception {
+        // 默认空操作：仅 RDBMS 需要前缀清理（MongoDB 集合无残留概念）
+    }
+
     /** 释放旁路连接资源（数据源/客户端由 Connector 生命周期管理，通常无需额外关闭） */
     default void close() throws Exception {
     }

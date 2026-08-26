@@ -12,7 +12,12 @@
 # workflow_call 中 github 上下文自动继承调用方仓库（github.repository / github.sha / github.event 等），
 # 同一份 workflow 无需区分开源/闭源仓库。
 #
-# 运行环境：office-build 自托管 runner（需预装 git/jq/Maven/JDK17，可访问公司内网测试资源与私有 Nexus）
+# 运行环境：
+#  - analyze（仅 diff 分析，不访问内网资源）：GitHub 托管 runner（ubuntu-latest），直连 GitHub 无需代理
+#  - test（集成测试）：tapdata-it 标签的自托管 runner（需组织级注册并对调用方仓库开放；
+#    需预装 git/jq/Maven/JDK，可访问公司内网测试资源与私有 Nexus）
+# 网络（test job）：git 访问 GitHub 经 ssh SOCKS 代理（ssh -D 1234 proxy_server），代理配置由
+# runner 容器挂载（/root/.ssh/config + id_ed25519），job 启动代理并在收尾清理。
 name: Connector Integration Tests (Reusable)
 
 on:
@@ -39,7 +44,8 @@ on:
         required: false
 
 jobs:
-  # 分析提交内容：挑选被修改且含 IT 用例的 connector 模块，输出 JSON 数组驱动矩阵
+  # 分析提交内容：挑选被修改且含 IT 用例的 connector 模块，输出 JSON 数组驱动矩阵。
+  # 仅涉及 git 操作与 jq（ubuntu-latest 预装），运行在 GitHub 托管 runner，不占用自建 runner
   analyze:
     runs-on: ubuntu-latest
     outputs:
@@ -217,13 +223,29 @@ jobs:
     name: IT - ${{ matrix.connector }}
     needs: analyze
     if: needs.analyze.outputs.has_changes == 'true'
-    runs-on: ubuntu-latest
+    runs-on: tapdata-it
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         connector: ${{ fromJson(needs.analyze.outputs.connectors) }}
     steps:
+      # 第零步：启动 ssh SOCKS 代理并配置 git（同 analyze job，checkout 与后续 mvn 拉依赖均需外网）
+      - name: Start SOCKS proxy and configure git
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -f -N -D 1234 -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 proxy_server
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/localhost/1234) 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          git config --global http.proxy socks5h://localhost:1234
+          git config --global https.proxy socks5h://localhost:1234
+          echo "SOCKS proxy ready on localhost:1234"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -311,3 +333,10 @@ jobs:
             echo "- Commit: \`${{ github.sha }}\`"
             echo "- Artifact: \`failsafe-reports-${{ github.repository_owner }}-${{ steps.name.outputs.safe }}-${{ github.sha }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # 收尾：无论成败清理 SOCKS 代理进程
+      - name: Stop SOCKS proxy
+        if: always()
+        shell: bash
+        run: |
+          pkill -f 'ssh .*-D 1234' || true

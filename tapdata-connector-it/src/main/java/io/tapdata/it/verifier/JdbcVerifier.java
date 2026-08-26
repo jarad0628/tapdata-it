@@ -311,6 +311,46 @@ public class JdbcVerifier implements ConnectorVerifier {
         });
     }
 
+    @Override
+    public void createForeignKeyConstraint(String table, String constraintName, String column,
+                                           String referencesTable, String referencesColumn) throws Exception {
+        final String sql = "ALTER TABLE " + qualifiedTable(table) + " ADD CONSTRAINT " + constraintName
+                + " FOREIGN KEY (" + qualifiedColumn(column) + ") REFERENCES "
+                + qualifiedTable(referencesTable) + " (" + qualifiedColumn(referencesColumn) + ")";
+        withAutoCommit(conn -> {
+            try (Statement st = conn.createStatement()) {
+                st.execute(sql);
+            } catch (java.sql.SQLException e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    @Override
+    public void dropTablesByPrefix(String prefix) throws Exception {
+        if (prefix == null || prefix.isEmpty()) {
+            return;
+        }
+        try (Connection conn = connection()) {
+            // JDBC 标准元数据 API 跨驱动通用；getTables 的 pattern 中下划线是单字符通配符，
+            // 匹配结果再按 startsWith 精确过滤，避免前缀中的下划线误伤
+            List<String> matched = new ArrayList<>();
+            try (ResultSet rs = conn.getMetaData().getTables(null, schemaPattern(), prefix + "%", new String[]{"TABLE"})) {
+                while (rs.next()) {
+                    String name = rs.getString("TABLE_NAME");
+                    if (name != null && name.startsWith(prefix)) {
+                        matched.add(name);
+                    }
+                }
+            }
+            for (String table : matched) {
+                try (Statement st = conn.createStatement()) {
+                    st.execute("DROP TABLE " + qualifiedTable(table));
+                }
+            }
+        }
+    }
+
     /** 表名限定（默认原样；DB2 i 等 Schema 限定库覆写为 {@code "SCHEMA"."TABLE"}） */
     protected String qualifiedTable(String table) {
         return table;

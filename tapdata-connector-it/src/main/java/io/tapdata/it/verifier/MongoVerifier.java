@@ -159,6 +159,12 @@ public class MongoVerifier implements ConnectorVerifier {
     }
 
     @Override
+    public void createForeignKeyConstraint(String table, String constraintName, String column,
+                                           String referencesTable, String referencesColumn) throws Exception {
+        // MongoDB 无约束概念，空操作（约束类用例通过 listConstraints 空结果自动跳过）
+    }
+
+    @Override
     public void insert(String table, List<Map<String, Object>> rows) throws Exception {
         if (rows == null || rows.isEmpty()) {
             return;
