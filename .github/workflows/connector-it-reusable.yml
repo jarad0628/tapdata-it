@@ -15,7 +15,7 @@
 # 运行环境：
 #  - analyze（仅 diff 分析，不访问内网资源）：GitHub 托管 runner（ubuntu-latest），直连 GitHub 无需代理
 #  - test（集成测试）：tapdata-it 标签的自托管 runner（需组织级注册并对调用方仓库开放；
-#    需预装 git/jq/Maven/JDK，可访问公司内网测试资源与私有 Nexus）
+#    需预装 git/jq/Maven/JDK 17（JAVA_HOME=/usr/java/jdk-17.0.12），可访问公司内网测试资源与私有 Nexus）
 # 网络（test job）：git 访问 GitHub 经 ssh SOCKS 代理（ssh -D 1234 proxy_server），代理配置由
 # runner 容器挂载（/root/.ssh/config + id_ed25519），job 启动代理并在收尾清理。
 name: Connector Integration Tests (Reusable)
@@ -23,11 +23,6 @@ name: Connector Integration Tests (Reusable)
 on:
   workflow_call:
     inputs:
-      java_version:
-        description: 'JDK 版本，用于编译与运行集成测试'
-        required: false
-        type: string
-        default: '17'
       common_changed_strategy:
         description: 'connectors-common 变更时的执行策略：all（运行全部有 IT 的 connector，保守）或 affected（仅运行依赖变更 common 模块的 connector）'
         required: false
@@ -259,12 +254,21 @@ jobs:
           echo "safe=${SAFE}" >> "$GITHUB_OUTPUT"
           echo "label=${SAFE}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ inputs.java_version }}
-          cache: maven
+      # 检查 JDK 可用性：runner 镜像已预装 JDK 17（/usr/java/jdk-17.0.12），
+      # 不使用 actions/setup-java 下载安装；Maven 本地仓库由 runner 容器挂载持久化（./m2-N:/root/.m2），
+      # 替代 setup-java 的 cache 功能
+      - name: Check JDK 17 and set JAVA_HOME
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 1. 检查 JDK 17 目录与 java 可执行文件
+          [[ -d /usr/java/jdk-17.0.12 ]] || { echo "::error::/usr/java/jdk-17.0.12 目录不存在"; exit 1; }
+          [[ -x /usr/java/jdk-17.0.12/bin/java ]] || { echo "::error::/usr/java/jdk-17.0.12/bin/java 不可执行"; exit 1; }
+          # 2. 设置 JAVA_HOME（指向 JDK 根目录，mvn 脚本按 $JAVA_HOME/bin/java 解析）并导出到后续步骤
+          echo "JAVA_HOME=/usr/java/jdk-17.0.12" >> "$GITHUB_ENV"
+          # 3. JDK bin 加入 PATH（GITHUB_PATH 后续步骤生效且优先），避免镜像默认 java（如 1.8）被误用
+          echo "/usr/java/jdk-17.0.12/bin" >> "$GITHUB_PATH"
+          /usr/java/jdk-17.0.12/bin/java -version 2>&1 | head -3
 
       - name: Configure Maven settings
         shell: bash
