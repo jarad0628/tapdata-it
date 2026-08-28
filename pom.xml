@@ -20,6 +20,23 @@
         <jackson.version>2.18.3</jackson.version>
     </properties>
 
+    <!-- Nexus 公有云 maven-snapshots 仓库：tapdata-pdk-api、tapdata-api 等 SNAPSHOT
+         制品发布于此，公网可达且无需认证；Release 依赖（jackson、junit 等）从 Central 默认解析 -->
+    <repositories>
+        <repository>
+            <id>nexus-tapdata-net</id>
+            <name>Nexus Snapshot Repository</name>
+            <url>https://nexus.tapdata.net/repository/maven-snapshots/</url>
+            <snapshots>
+                <enabled>true</enabled>
+                <updatePolicy>always</updatePolicy>
+            </snapshots>
+            <releases>
+                <enabled>false</enabled>
+            </releases>
+        </repository>
+    </repositories>
+
     <modules>
         <module>tapdata-connector-it</module>
     </modules>
