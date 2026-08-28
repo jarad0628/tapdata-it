@@ -270,13 +270,15 @@ jobs:
           echo "/usr/java/jdk-17.0.12/bin" >> "$GITHUB_PATH"
           /usr/java/jdk-17.0.12/bin/java -version 2>&1 | head -3
 
-      - name: Configure Maven settings
+      - name: Configure Maven settings and SSL
         shell: bash
         run: |
           if [[ -n "${{ secrets.MAVEN_SETTINGS }}" ]]; then
             mkdir -p "$HOME/.m2"
             echo "${{ secrets.MAVEN_SETTINGS }}" > "$HOME/.m2/settings.xml"
           fi
+          # 自托管 runner 环境：内网 Nexus 使用自签名证书，跳过 SSL 验证
+          echo "MAVEN_OPTS=-Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true" >> "$GITHUB_ENV"
 
       # 第零步：预装 connectors-common 聚合 POM 声明的全部公共模块到本地仓库（-am 自动带上父 POM 与模块间依赖），
       # 保证 connector 依赖链（-am）之外的公共模块也能从本地仓库解析，避免矩阵任务重复全量安装；
