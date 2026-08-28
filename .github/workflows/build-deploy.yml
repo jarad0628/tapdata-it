@@ -1,0 +1,64 @@
+# tapdata-it CI：推送代码 → 编译 + 单元测试 → 部署 SNAPSHOT 到 Nexus
+#
+# 触发时机：任意分支 push（含 PR 合并），忽略文档/docker 变更。
+# 运行环境：GitHub 托管 runner（ubuntu-latest），通过 actions/setup-java 安装 JDK 17。
+# 依赖仓库：内部依赖（tapdata-pdk-api、tapdata-api）需通过 secrets.MAVEN_SETTINGS
+#           提供的 settings.xml 中的 <mirror>/<repository> 指向可达的 Maven 仓库；
+#           若默认 Nexus（nexus.tapdata.net）为内网地址，托管 runner 无法访问。
+#
+#   ⚠️ 前置条件
+#   1. 仓库的 MAVEN_SETTINGS secret 必须配置 settings.xml，包含 Nexus 镜像/仓库与认证
+#   2. Nexus 需有公网入口或托管 runner 能解析/路由（如 GitHub 允许的 IP 白名单）
+#      否则 compile/deploy 均会因依赖不可解析而失败
+#
+name: Build and Deploy
+
+on:
+  push:
+    branches: ['main']
+    paths-ignore:
+      - 'docs/**'
+      - 'docker/**'
+      - '**.md'
+      - '.gitignore'
+
+concurrency:
+  group: build-deploy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+
+      - name: Configure Maven settings
+        shell: bash
+        run: |
+          if [[ -n "${{ secrets.MAVEN_SETTINGS }}" ]]; then
+            mkdir -p "$HOME/.m2"
+            echo "${{ secrets.MAVEN_SETTINGS }}" > "$HOME/.m2/settings.xml"
+          fi
+
+      # surefire 默认 skipTests=true（集成测试框架用，单元测试需显式取消跳过）；
+      # 当前 tapdata-connector-it 尚未包含 src/test 用例，此步骤仅编译验证；
+      # 后续添加单元测试后自动生效
+      - name: Compile and run unit tests
+        shell: bash
+        run: |
+          mvn -B test -DskipTests=false
+
+      # 部署 SNAPSHOT 到 Nexus（版本为 1.0-SNAPSHOT，每次覆盖）；仅在 settings.xml
+      # 配置了 nexus-tapdata-net server 认证且托管 runner 可达时生效
+      - name: Deploy to Nexus
+        shell: bash
+        run: |
+          mvn -B deploy -DskipTests=true

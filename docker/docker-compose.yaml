@@ -52,6 +52,7 @@ services:
       - /ssd/app/runner-it/runner-1/m2:/root/.m2
       - ./root_id_ed25519_proxy_server_key:/root/.ssh/root_id_ed25519_proxy_server_key
       - ./config:/root/.ssh/config
+      - /app/config/truststore17.jks:/usr/java/jdk-17.0.12/lib/security/cacerts
 
   runner-it-2:
     <<: *runner-common
@@ -61,3 +62,24 @@ services:
       - /ssd/app/runner-it/runner-2/m2:/root/.m2
       - ./root_id_ed25519_proxy_server_key:/root/.ssh/root_id_ed25519_proxy_server_key
       - ./config:/root/.ssh/config
+      - /app/config/truststore17.jks:/usr/java/jdk-17.0.12/lib/security/cacerts
+
+  runner-it-3:
+    <<: *runner-common
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - /ssd/app/runner-it/runner-3/work:/_work
+      - /ssd/app/runner-it/runner-3/m2:/root/.m2
+      - ./root_id_ed25519_proxy_server_key:/root/.ssh/root_id_ed25519_proxy_server_key
+      - ./config:/root/.ssh/config
+      - /app/config/truststore17.jks:/usr/java/jdk-17.0.12/lib/security/cacerts
+
+  runner-it-4:
+    <<: *runner-common
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - /ssd/app/runner-it/runner-4/work:/_work
+      - /ssd/app/runner-it/runner-4/m2:/root/.m2
+      - ./root_id_ed25519_proxy_server_key:/root/.ssh/root_id_ed25519_proxy_server_key
+      - ./config:/root/.ssh/config
+      - /app/config/truststore17.jks:/usr/java/jdk-17.0.12/lib/security/cacerts
