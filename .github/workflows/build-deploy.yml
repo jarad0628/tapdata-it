@@ -42,10 +42,12 @@ jobs:
 
       - name: Configure Maven settings
         shell: bash
+        env:
+          MAVEN_SETTINGS: ${{ secrets.MAVEN_SETTINGS }}
         run: |
-          if [[ -n "${{ secrets.MAVEN_SETTINGS }}" ]]; then
+          if [[ -n "${MAVEN_SETTINGS}" ]]; then
             mkdir -p "$HOME/.m2"
-            echo "${{ secrets.MAVEN_SETTINGS }}" > "$HOME/.m2/settings.xml"
+            echo "${MAVEN_SETTINGS}" > "$HOME/.m2/settings.xml"
           fi
 
       # surefire 默认 skipTests=true（集成测试框架用，单元测试需显式取消跳过）；
