@@ -38,6 +38,7 @@
     </repositories>
 
     <modules>
+        <module>tapdata-it-common</module>
         <module>tapdata-connector-it</module>
     </modules>
 

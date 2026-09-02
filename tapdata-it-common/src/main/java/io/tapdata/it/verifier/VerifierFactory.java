@@ -4,6 +4,8 @@ import io.tapdata.entity.utils.DataMap;
 import io.tapdata.pdk.apis.TapConnector;
 
 import java.lang.reflect.Field;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * 旁路验证器工厂：反射扫描 Connector 实例字段（含继承链），按成员类型自动装配验证器。
@@ -63,10 +65,22 @@ public final class VerifierFactory {
     }
 
     private static boolean isInstance(Object value, String targetClass) {
-        try {
-            return Class.forName(targetClass).isInstance(value);
-        } catch (ClassNotFoundException e) {
-            return false;
+        // 不用 Class.forName(...).isInstance(...)：引擎 IT 场景 connector 由外部 jar
+        // classloader 加载，与测试 classpath 的同名类不同源，isInstance 永远 false。
+        // 改用类名沿继承链（父类 + 接口，递归）匹配，跨 classloader 依然成立。
+        Set<String> visited = new HashSet<>();
+        collectTypeNames(value.getClass(), visited);
+        return visited.contains(targetClass);
+    }
+
+    /** 收集类及其全部父类/接口（递归）的类名 */
+    private static void collectTypeNames(Class<?> c, Set<String> names) {
+        if (c == null || !names.add(c.getName())) {
+            return;
+        }
+        collectTypeNames(c.getSuperclass(), names);
+        for (Class<?> iface : c.getInterfaces()) {
+            collectTypeNames(iface, names);
         }
     }
 }

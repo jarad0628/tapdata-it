@@ -1,12 +1,12 @@
 # tapdata-it 架构说明（基于最新实现）
 
-> 版本：v2.0（对应旁路验证器 + 声明式能力改造后的最新代码）
+> 版本：v3.0（对应 TapValue 转换契约 + 外键约束 + 引擎 codec 全链路验证改造后的最新代码）
 > 目标模块：`tapdata/tapdata-it`
 > 前置阅读：[connector-it.md](./connector-it.md)（v1.0 设计文档，本文档以最新实现为准）
 
 ## 1. 模块定位与核心设计理念
 
-`tapdata-it` 是 TapData 连接器生态的**通用集成测试框架**：一份测试用例全集（61 个），任何 Connector 只需继承 `ConnectorIT` 并提供连接上下文，即可自动运行全部用例，覆盖 `ConnectorFunctions` 的绝大多数能力（建表/删表/读写/索引/约束/字段 DDL/流式/事务/命令/分区等）。
+`tapdata-it` 是 TapData 连接器生态的**通用集成测试框架**：一份测试用例全集（74 个），任何 Connector 只需继承 `ConnectorIT` 并提供连接上下文，即可自动运行全部用例，覆盖 `ConnectorFunctions` 的绝大多数能力（建表/删表/读写/索引/约束/字段 DDL/流式/事务/命令/分区等），以及引擎边界 TapValue 转换契约（wrap/unwrap/spec 声明驱动的类型校验）。
 
 最新实现围绕三条**可靠性原则**构建：
 
@@ -26,14 +26,14 @@
 ┌───────┴─────────────────────────────────────────────────────────┐
 │  tapdata-it（通用集成测试框架）                                   │
 │                                                                 │
-│  ConnectorIT（抽象基类：生命周期 + 61 个通用用例 + 工具方法）       │
+│  ConnectorIT（抽象基类：生命周期 + 74 个通用用例 + 工具方法）      │
 │    ├── 声明式能力：requiredCapabilities() 必实现声明 + 覆盖校验用例  │
 │    ├── verifier/  旁路验证器（ConnectorVerifier / Factory / Jdbc / Mongo）│
 │    ├── schema/    测试表/字段模型（TestTableSpec / TestFieldSpec / TestDataType）│
 │    ├── generator/ 随机数据生成器（ValueGenerator 体系 + RandomDataFactory）│
-│    ├── mapping/   TapTypeResolver（方言类型 → TapType，与引擎同源） │
-│    ├── asserts/   RecordAssert / TableAssert（类型等价比较断言）    │
-│    ├── support/   内存 KVMap / 日志等运行时支撑                    │
+│    ├── mapping/   TapTypeResolver + TapValueClassResolver（spec 驱动类型解析）│
+│    ├── asserts/   RecordAssert / TableAssert / TapValueAssert（类型 + 转换契约断言）│
+│    ├── support/   内存 KVMap / EngineCodecs / 日志等运行时支撑      │
 │    └── ConnectorTestContext（测试上下文：builder + 特性开关）       │
 └───────────────▲─────────────────────────────────────────────────┘
                 │ 继承 + createContext()
@@ -51,7 +51,7 @@
 
 ### 2.1 ConnectorIT —— 抽象基类（核心）
 
-[ConnectorIT.java](../src/main/java/io/tapdata/it/ConnectorIT.java)（约 1927 行）承担四类职责：
+[ConnectorIT.java](../src/main/java/io/tapdata/it/ConnectorIT.java)（约 2625 行）承担五类职责：
 
 **① 生命周期驱动（与引擎 PdkNode 一致）**
 
@@ -68,7 +68,7 @@
 - `prepareContext` 补齐引擎运行时要素：`stateMap`（内存 KVMap）、`connectorCapabilities`（DML 策略与引擎一致：`JUST_INSERT` / `IGNORE_ON_NON_EXISTS`）、`tableMap`（内存 KVMap）、`flushOffsetCallback`（低版本 pdk-api 反射跳过）。
 - `tearDown` 无论断言成败都执行残留表清理与 `stop()`，防止连接泄漏；堆内存用量在用例边界打印，用于发现资源泄漏。
 
-**② 16 个子类扩展点（详见第 4 章）**
+**② 25+ 个子类扩展点（详见第 4 章）**
 
 **③ 能力检测工具（原则 3）**
 
@@ -93,10 +93,18 @@ protected <F> F require(Supplier<F> getter, String capability) {
 
 **④ 用例全集与工具方法**
 
-- 用例按 A~J 十组组织（见第 3 章），每个用例 `@Test + @UnderTest`。
-- 工具方法分两类：
+- 用例按 A~K 十一组组织（见第 3 章），每个用例 `@Test + @UnderTest`（K 组部分用例不标注 `@UnderTest`，验证的是 codec 转换契约而非 Connector 能力接口）。
+- 工具方法分三类：
   - **被测侧**：`writeInsertEvents/writeUpdateEvents/writeDeleteEvents`（TapRecordEvent 构建 + writeRecord 调用，与引擎 PdkTargetNode 一致）、`batchReadAll`、`discoverTable`、`tableNames` 等；
-  - **旁路侧（原则 1）**：`createTableIfNeeded`（一律 `verifier().createTable`，无验证器时 fail，**禁止降级到 connector**）、`bypassInsert`（旁路写入 + count 确认）、`prepareData`（旁路建表+写数，返回期望数据）、`verifyCount`、`verifyRowsByPk`、`pkValues`、`dropResidualTables`（旁路优先）。
+  - **旁路侧（原则 1）**：`createTableIfNeeded`（一律 `verifier().createTable`，无验证器时 fail，**禁止降级到 connector**）、`bypassInsert`（旁路写入 + count 确认）、`prepareData`（旁路建表+写数，返回期望数据）、`verifyCount`、`verifyRowsByPk`、`pkValues`、`dropResidualTables`（旁路优先 + 外键父表前缀兜底清理）；
+  - **引擎 codec 侧（K 组）**：`wrapRow/unwrapRow`（TapValue 转换）、`writeInsertEventsViaEngineCodec`（引擎写全路径）、`expectedTapValueClasses/expectedTapValueClassesForReadBack/expectedTapValueClassesForTapType`（期望类推导）。
+
+**⑤ 引擎 codec 转换契约（K 组 U1~U10）**
+
+ConnectorIT 内置 10 个转换契约用例（U1~U10），验证引擎 Connector 边界的数据类型转换语义：
+- wrap = 普通值 → TapValue（`transformToTapValueMap`），unwrap = TapValue → 普通值（`transformFromTapValueMap`），均复用 connector `registerCapabilities` 的 codecRegistry，与引擎 `TaskNodePdkConnector` 边界行为一致；
+- U5 标注 `@UnderTest("writeRecord")`（写侧引擎 codec 路径），U10 标注 `@UnderTest("batchRead")`（经库读回 → 统一转换 → spec 声明断言），其余用例不标注；
+- 特殊值样本由子类 `specialValueSamples()` 提供（如 MongoDB 的 ObjectId/Decimal128），嵌套类型用例由 `enableNestedTypes()` 控制。
 
 ### 2.2 @UnderTest —— 用例能力声明注解
 
@@ -118,7 +126,7 @@ public @interface UnderTest {
 
 ### 2.3 verifier/ —— 旁路验证器体系（原则 1 的载体）
 
-**ConnectorVerifier 接口**（11 个方法 + close）：
+**ConnectorVerifier 接口**（13 个方法 + close）：
 
 | 分组 | 方法 | 用途 |
 |---|---|---|
@@ -126,7 +134,8 @@ public @interface UnderTest {
 | 结构准备 | `createTable` / `insert` | 旁路建表、旁路写数（不经过 connector） |
 | DDL 锚点 | `tableExists` / `dropTable` / `tableColumns` | 表存在性、删表、列元数据（字段级 DDL 旁路验证） |
 | 索引 | `listIndexes` / `createIndex` | 索引动作的旁路准备与验证 |
-| 约束 | `listConstraints` / `createConstraint` | 约束动作的旁路准备与验证（无约束概念的数据源返回空） |
+| 约束 | `listConstraints` / `createConstraint` / `createForeignKeyConstraint` | 约束动作的旁路准备与验证（含外键；无约束概念的数据源返回空） |
+| 清理 | `dropTablesByPrefix` | 按前缀批量删表（外键用例辅助父表兜底清理） |
 
 **VerifierFactory** —— 零配置自动装配：
 
@@ -169,7 +178,7 @@ public @interface UnderTest {
 
 ### 2.5 schema/ —— 测试表与字段模型
 
-- `TestDataType`：13 个通用类型枚举，与 PDK `TapType` 一一对应，是生成器选择与断言分派的中枢；
+- `TestDataType`：15 个通用类型枚举（INT/BIGINT/VARCHAR/TEXT/BLOB/DECIMAL/FLOAT/DOUBLE/BOOLEAN/DATE/DATETIME/TIMESTAMP/MAP/ARRAY/SEQUENCE），与 PDK `TapType` 一一对应，是生成器选择与断言分派的中枢；其中 MAP/ARRAY 仅用于转换契约用例（不落库），SEQUENCE 仅用于生成器；
 - `TestFieldSpec`：列语义描述——`dataType`（方言类型，如 `VARCHAR(255)`/`Int32`）、`testDataType`（通用语义）、`length/scale/precision`、`primaryKey/autoInc/nullable`、`fixedValue`（边界注入）；
 - `TestTableSpec`：表名随机生成（`_tap_it_` + 时间戳 Base36 + 随机串，用例间隔离）+ 有序字段列表；`defaultAllTypesSpec()` 覆盖 11 种类型，TEXT/BLOB 为可选大对象（AS400 不支持，按需启用）。
 
@@ -191,33 +200,63 @@ resolver.isDeclared("FLOAT(4)");    // → true（spec 声明即通过）
 
 **与引擎 wrap 链路同源**：引擎的 `TableFieldTypesGenerator.autoFill` 用同一份 spec dataTypes 将方言值包装为 TapXxxx 类型，因此集成测试**不再维护方言映射表**——spec 声明即事实，spec 缺失某类型时断言直接失败（反向约束 spec 完备性）。
 
-### 2.8 asserts/ —— 类型等价比较断言
+### 2.8 asserts/ —— 类型等价比较断言 + 转换契约断言
 
 - `RecordAssert`：按列类型分派比较，容忍数据库存储/回读的类型等价差异——数值族 BigDecimal 归一化（decimal 固定 scale=4）；float/double 相对误差 1e-6；布尔兼容 `true/1/1.0`；日期族统一转 LocalDateTime(UTC) 并**四舍五入到秒**（MySQL timestamp(0) 列小数秒舍入存储行为）；字符串去尾部空白；
-- `TableAssert`：字段存在性/顺序/类型族（TapType）/dataType 被 spec 声明/主键标记；宽松模式适配 NoSQL（允许额外字段、主键非严格）。
+- `TableAssert`：字段存在性/顺序/类型族（TapType）/dataType 被 spec 声明/主键标记；宽松模式适配 NoSQL（允许额外字段、主键非严格）；
+- `TapValueAssert`：K 组转换契约专用——TapValue 值类断言（实际类 ∈ 期望集合）、值语义等价比较（含嵌套 Map/List JSON 解析兼容）、origin 元数据断言（originValue 保留与原始值等价）。
 
 ### 2.9 support/ —— 运行时支撑
 
 `TestStateMap` / `TestTableMap`：内存 KVMap 实现，替代引擎的持久化 KVMap 供给 `TapConnectorContext`（部分 Connector 在 onStart/写记录/DDL 时依赖 stateMap/tableMap 存取元数据，缺失会导致 NPE 或行为退化——DB2 i 的 `timestampToStreamOffset` 依赖 tableMap 查系统表名拼 journal 过滤条件，tableMap 为空时 offset 退化为 0）。`TestJobContext`/`TestLog` 提供日志与任务上下文支撑。
 
-## 3. 用例分组总览（A~J 十组，61 个用例）
+`EngineCodecs`：引擎编解码过滤器管理器工厂，复用 connector `registerCapabilities` 产物的 `codecRegistry` 组装 `TapCodecsFilterManager`（与引擎 `TaskNodePdkConnector` 边界数据流一致），供 K 组转换契约用例使用。
+
+### 2.10 mapping/TapValueClassResolver —— TapValue 期望类解析器
+
+[TapValueClassResolver.java](../src/main/java/io/tapdata/it/mapping/TapValueClassResolver.java)：按 `TestDataType` 或 spec.json 解析出的 `TapType` 推导 wrap 后应得到的 TapValue 类集合，是 K 组用例断言“实际包装类 ∈ 期望集合”的依据。
+
+核心规则：
+- 引擎原生契约：仅 schema 专用类型（DATE/DATETIME/TIME/BINARY/MAP/ARRAY/YEAR）有专用 codec 会被包装；其余（NUMBER/STRING/BOOLEAN）引擎不包装、值原样保留；
+- 连接器自定义 codec 合法升级：期望类集合包含“引擎原生契约类”+“连接器注册自定义 codec 后可升级到的合法类”，避免自定义 codec 注册后误报；
+- spec 驱动（`expectedClassesForTapType`）：按 spec.json dataTypes 解析出的 TapType 族推导，U10 用例用。
+
+### 2.11 转换契约工具方法（K 组支撑）
+
+ConnectorIT 基类提供以下工具方法支撑 K 组转换契约用例：
+
+| 方法 | 用途 |
+|---|---|
+| `wrapRow(row, table)` | 普通值 Map → TapValue Map（`transformToTapValueMap`，复用 connector codecRegistry） |
+| `unwrapRow(tapValueRow)` | TapValue Map → 普通值 Map（`transformFromTapValueMap`，输入 map 原地解包） |
+| `writeInsertEventsViaEngineCodec(rows, table)` | 引擎写全路径：wrap → unwrap（引擎边界解包）→ TapInsertRecordEvent → writeRecord |
+| `expectsWrap(type)` | 该类型字段 wrap 后是否应被包装为 TapValue（默认按引擎原生契约） |
+| `expectedTapValueClasses(type)` | 生成值 wrap 后的期望 TapValue 类集合 |
+| `expectedTapValueClassesForReadBack(type)` | 读回值 wrap 后的期望 TapValue 类集合 |
+| `expectedTapValueClassesForTapType(tapType)` | spec 驱动的读回值 wrap 期望类集合（U10） |
+| `boundaryValue(type)` | 边界值样本（0/空串/min/max/最小日期等，U7 用） |
+| `specialValueSamples()` | 子类覆写：连接器特有特殊值样本（如 MongoDB ObjectId/Decimal128，U8 用） |
+| `enableNestedTypes()` | 子类覆写：是否启用嵌套 MAP/ARRAY 转换契约用例（U9） |
+
+## 3. 用例分组总览（A~K 十一组，74 个用例）
 
 | 组 | 覆盖能力 | 典型用例 | 旁路验证方式 |
 |---|---|---|---|
 | A 连接与元数据 | connectionTest / discoverSchema / getTableNames / dropTable / getTableInfo / checkTableName / getCharsets / connectionCheck | `should_discover_schema_of_created_table`、`should_table_not_found_after_drop` | 旁路建表 + `tableExists` 锚点 |
 | B 表级 DDL | createTableV2 / clearTable / dropTable / alterTableCharset / alterTableTTL / alterDatabaseTimeZone | `should_create_table_v2`（+tableExists +count=0）、`should_clear_table` | 旁路建表/写数 + `tableExists`/`count` |
 | C 数据读写（核心） | writeRecord / batchCount / batchRead / queryByFilter / queryByAdvanceFilter / afterInitialSync | `should_write_insert_records`（count+select 双确认）、`should_batch_read_data_consistent`（与旁路 select groundTruth 逐行比对） | 旁路 count + `selectByPk` |
-| D 索引与约束 | createIndex / queryIndexes / deleteIndex / createConstraint / queryConstraints / dropConstraint | `should_delete_index`（旁路准备索引 → 被测删除 → 旁路 listIndexes 验证） | `listIndexes`/`listConstraints` |
+| D 索引与约束 | createIndex / queryIndexes / deleteIndex / createConstraint / queryConstraints / dropConstraint | `should_delete_index`（旁路准备索引 → 被测删除 → 旁路 listIndexes 验证）、`should_create_foreign_key_constraint`（外键用例：旁路建父表+写数 → 被测建外键 → 旁路 listConstraints 验证） | `listIndexes`/`listConstraints` |
 | E 字段级 DDL | newField / dropField / alterFieldName / alterFieldAttributes | `should_alter_field_attributes`（size 扩为 500） | `tableColumns` |
 | F 流式读取 | timestampToStreamOffset / streamRead / streamReadOneByOne / streamReadMultiConnection | `should_stream_read_incremental`（写前注册 tableMap → 旁路写增量 → 15s 窗口收齐 → 与旁路 groundTruth 逐字段比对） | `bypassInsert` + `selectByPk` |
 | G 事务 | transactionBegin/Commit/Rollback | `should_transaction_commit`（commit 后旁路 count=5）、`should_transaction_rollback`（rollback 后旁路 count=0） | 旁路 `count` |
 | H 命令 | executeCommand / executeCommandV2 / runRawCommand / countRawCommand / exportEventSql | `should_run_raw_command`（读回行数 == 旁路 count） | 旁路 `count` |
 | I 其他 | getCurrentTimestamp / queryHashByAdvanceFilter / control / processControl / getStreamOffset / flushOffset / errorHandle / createPartitionTable / queryPartitionTablesByParentName / dropPartitionTable / countByPartitionFilter / getReadPartitions / queryFieldMinMaxValue / connectorWebsite / tableWebsite / commandCallback | `should_get_read_partitions`（consumer 至少收到 1 个分区）、`should_query_field_min_max`（min/max 与旁路 select 计算值比对） | 旁路 count / `selectByPk` / `tableExists` |
 | J 能力覆盖校验（原则 3） | 全能力三集合自检：requiredCapabilities（声明）⊆ implementedCapabilities（实现）⊆ coveredCapabilities（覆盖） | `should_all_capabilities_implemented_and_covered`——不遗漏必实现接口 + 已实现（含未声明）必被测到 | 无（纯框架自检） |
+| K TapValue 转换契约（U1~U10） | wrap/unwrap 引擎边界转换语义（writeRecord/batchRead 标注能力，其余为 codec 契约验证） | U1 wrap 契约（专用类型包装为 TapValue）、U2 unwrap 契约、U3 往返等价、U4 originValue 保留、U5 引擎 codec 写全路径、U6 读回 wrap、U7 null/边界值、U8 连接器特有特殊值（MongoDB ObjectId/Decimal128）、U9 嵌套 MAP/ARRAY、U10 spec 声明驱动全链路验证 | 旁路 `selectByPk` / `batchRead` + `TapValueAssert` |
 
 ## 4. 如何扩展（接入新 Connector 的分级指南）
 
-### 4.1 一级：最小接入（MySQL 范式，~60 行）
+### 4.1 一级：最小接入（MySQL 范式，~90 行）
 
 ```java
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -244,14 +283,14 @@ public class XxxConnectorIT extends ConnectorIT {
 
 ### 4.2 二级：特性开关适配（MongoDB 范式）
 
-在 `createContext()` 中按数据源语义设置 6 个特性开关（见 2.4），或覆写 `beforeWrite()` 钩子（如 MongoDB 保证 `c_int` 唯一以满足唯一索引用例）。**用例代码零改动**。
+在 `createContext()` 中按数据源语义设置 6 个特性开关（见 2.4），或覆写 `beforeWrite()` 钩子（如 MongoDB 保证 `c_int` 唯一以满足唯一索引用例）、`specialValueSamples()` 钩子（如 MongoDB 提供 ObjectId/Binary/Code/Decimal128/Symbol/BsonTimestamp/BsonRegularExpression 等 BSON 特有类型样本，U8 用例验证这些特殊值被连接器自定义 codec 识别而非 TapRawValue 兜底）。**用例代码零改动**。
 
 ### 4.3 三级：方言适配（DB2 i 范式）
 
 | 扩展点 | 场景 | DB2 i 示例 |
 |---|---|---|
 | `createTestTableSpec()` | 方言类型差异 | FLOAT→REAL/DOUBLE、BOOLEAN→SMALLINT、DATETIME→TIMESTAMP，关闭大对象 |
-| `createVerifier()` | 标识符引用/系统目录差异 | 匿名 JdbcVerifier 覆写 `qualifiedTable`/`qualifiedColumn`（双引号 schema 限定）、`schemaPattern`、`listIndexes`/`listConstraints`（QSYS2.SYSINDEXES/SYSCST）、索引/约束名双引号限定 |
+| `createVerifier()` | 标识符引用/系统目录差异 | 匿名 JdbcVerifier 覆写 `qualifiedTable`/`qualifiedColumn`（双引号 schema 限定）、`schemaPattern`、`listIndexes`/`listConstraints`（QSYS2.SYSINDEXES/SYSCST）、`tableColumns`（QSYS2.SYSCOLUMNS 替代 jt400 不工作的 DatabaseMetaData.getColumns）、索引/约束名双引号限定、`createIndex`/`createConstraint` 名称双引号限定 |
 | `rawQueryCommand()` / `rawCountCommand()` | 原始命令方言 | `select * from "SCHEMA"."TABLE"` |
 
 ### 4.4 四级：无法自动发现的验证器
@@ -279,6 +318,14 @@ public class XxxConnectorIT extends ConnectorIT {
 | `beforeWrite()` | 原样返回 | 构造依赖数据/约束/唯一化 |
 | `requiredCapabilities()` | 当前已注册的全部接口实现（implementedCapabilities()） | 按角色（源/目标）收窄声明必实现接口，框架校验不遗漏 + 已实现必被覆盖 |
 | `ignoredCapabilities()` | releaseExternal / memoryFetcher / memoryFetcherV2 | 排除引擎生命周期钩子等非业务能力 |
+| `createEngineCodecsFilterManager()` | 复用 connector codecRegistry 组装 | 无 codecRegistry 时返回 null，K 组用例自动跳过 |
+| `expectsWrap(type)` | 按引擎原生契约（仅专用 codec 类型包装） | 注册了自定义 ToTapValueCodec 的连接器覆写 |
+| `expectedTapValueClasses(type)` | 按引擎原生契约 + 自定义 codec 合法升级推导 | 定制 wrap 期望类集合 |
+| `expectedTapValueClassesForReadBack(type)` | 读回类型差异推导 | 时间列读回类型不同时的定制 |
+| `expectedTapValueClassesForTapType(tapType)` | spec 驱动推导 | U10 spec 声明驱动定制 |
+| `wrapsByTapType(tapType)` | 按专用 codec 契约判定 | spec 驱动 wrap 契约定制 |
+| `specialValueSamples()` | 空 Map | 连接器特有特殊值样本（如 MongoDB ObjectId/Decimal128/BsonTimestamp，U8 用） |
+| `enableNestedTypes()` | true | 无 map/array 类型或类型映射不支持时返回 false |
 
 ## 5. 设计优势（重点）
 
@@ -302,27 +349,28 @@ public class XxxConnectorIT extends ConnectorIT {
 
 ### 5.3 声明式三态，报告语义精确
 
-`requiredCapabilities()` 把 connector 的必实现接口清单**显式编码在代码里**，`@UnderTest` 把每个用例的意图（被测哪个能力、是否必须旁路）同样显式编码；`require()` 的三态判定（FAIL/SKIP/TEST）使测试报告能精确区分"connector 未实现该能力（跳过，符合预期）"与"声明了却没实现（失败，回归信号）"，框架级校验用例则保证已实现能力（含未声明）全部有覆盖——61 个用例的通过/失败/跳过统计可直接反推 connector 的能力覆盖矩阵。
+`requiredCapabilities()` 把 connector 的必实现接口清单**显式编码在代码里**，`@UnderTest` 把每个用例的意图（被测哪个能力、是否必须旁路）同样显式编码；`require()` 的三态判定（FAIL/SKIP/TEST）使测试报告能精确区分“connector 未实现该能力（跳过，符合预期）”与“声明了却没实现（失败，回归信号）”，框架级校验用例则保证已实现能力（含未声明）全部有覆盖——74 个用例的通过/失败/跳过统计可直接反推 connector 的能力覆盖矩阵。
 
 ### 5.4 零配置自动装配，接入成本极低
 
-`VerifierFactory` 反射扫描成员按类型自动装配（JdbcContext→JdbcVerifier、MongoClient→MongoVerifier），全程字符串类名——**tapdata-it 不依赖 sql-core、mongodb-driver、任何具体 Connector**。新增 Connector 的最小接入只有 `createContext()` 一个方法（MySQLConnectorIT 仅 59 行），旁路能力自动获得；无法自动发现的场景由 `createVerifier()` 覆写点兜底，扩展路径清晰。
+`VerifierFactory` 反射扫描成员按类型自动装配（JdbcContext→JdbcVerifier、MongoClient→MongoVerifier），全程字符串类名——**tapdata-it 不依赖 sql-core、mongodb-driver、任何具体 Connector**。新增 Connector 的最小接入只有 `createContext()` 一个方法（MySQLConnectorIT 仅 90 行），旁路能力自动获得；无法自动发现的场景由 `createVerifier()` 覆写点兜底，扩展路径清晰。
 
 ### 5.5 特性开关 + 钩子，NoSQL 适配不侵入用例
 
 6 个数据库特性开关把 MongoDB 等 schema-free 数据源的语义差异（隐式 `_id`、幂等建集合、采样数据发现、索引驱动 min/max）收敛为**配置项**，而不是给每个用例加 if-else 或复制用例——同一份用例在 MySQL（严格断言）与 MongoDB（宽松断言）上同时成立，用例代码零分叉。
 
-### 5.6 与引擎同源，测试路径即生产路径
+### 5.6 引擎 codec 全链路验证，测试路径即生产路径
 
 - 类型解析：`TapTypeResolver` 直接用 connector spec.json 的 `dataTypes`（与引擎 `TableFieldTypesGenerator.autoFill` 同款解析），**不维护独立方言映射表**——spec 声明即事实，测试同时反向校验 spec 完备性；
 - 生命周期：`init → 能力调用 → releaseExternal → stop` 与引擎 PdkNode 一致；
-- 上下文：DML 策略（JUST_INSERT/IGNORE_ON_NON_EXISTS）、tableMap 注册（流式用例写前注册，模拟引擎建表后行为）、codec 转换（`transformFromTapValueMap`）均与引擎一致——**在测试里发现的问题，就是引擎里会发生的问题**（DB2 i streamRead 的 tableMap 依赖正是由此暴露）。
+- 上下文：DML 策略（JUST_INSERT/IGNORE_ON_NON_EXISTS）、tableMap 注册（流式用例写前注册，模拟引擎建表后行为）、codec 转换（`transformFromTapValueMap`）均与引擎一致——**在测试里发现的问题，就是引擎里会发生的问题**（DB2 i streamRead 的 tableMap 依赖正是由此暴露）；
+- K 组转换契约：`TapCodecsFilterManager` 复用 connector codecRegistry（与引擎 `TaskNodePdkConnector` 边界一致），U1~U10 用例覆盖 wrap/unwrap 全路径——从生成值包装、引擎边界解包、写后读回、spec 声明驱动验证，确保连接器 codec 在引擎同构数据流中的正确性（MongoDB 的 ObjectId/Decimal128 特殊值识别、时间类型 codec 升级、嵌套 MAP/ARRAY 递归处理均在此路径下验证）。
 
 ### 5.7 工程健壮性
 
 - **隔离**：表名随机 + 每次用例独立建表 + tearDown 兜底删除（断言失败也执行）；
 - **资源**：tearDown 保证 `releaseExternal`+`stop`，堆内存边界打印跟踪泄漏；
-- **陷阱修复**：`withAutoCommit` 规避引擎连接池 autoCommit=false 回滚（MySQL 实测数据丢失）；MongoDB 反射只走公开接口（规避 Java 9+ 模块系统）；变参反射签名（`String[].class`）；
+- **陷阱修复**：`withAutoCommit` 规避引擎连接池 autoCommit=false 回滚（MySQL 实测数据丢失）；MongoDB 反射只走公开接口（规避 Java 9+ 模块系统）；变参反射签名（`String[].class`）；外键用例辅助父表按前缀兜底清理；
 - **版本兼容**：按 pdk-api 2.0.5 编译 + `reflectFunction` 反射处理新能力（alterTableTTL/processControl），低版本环境自动跳过；
 - **可复现**：生成器支持种子；`RecordAssert` 类型等价比较（秒级舍入、相对误差、布尔兼容）消除存储差异导致的误报；
 - **可观测**：每个用例/工具方法输出耗时、行数、堆内存、验证器类型，失败信息含列名/期望/实际/类型。
@@ -333,4 +381,6 @@ public class XxxConnectorIT extends ConnectorIT {
 2. **旁路 SQL 方言**：JdbcVerifier 默认 `information_schema` 目录与裸标识符，非 MySQL 系数据库需覆写（DB2 i 已示范）；
 3. **约束语义差异**：connector `queryConstraints` 的语义（如 CommonDbConnector 只查外键）与旁路 `listConstraints`（查全部约束）可能不一致，此类失败是 connector 实现问题而非测试问题，需在报告中区分；
 4. **流式用例**：依赖真实 CDC 环境（binlog/journal），旁路写入确认落库后收不到增量多为环境/实现基线问题，可用 A/B 实验（改回 writeInsertEvents）确认；
-5. **执行方式**：`mvn -pl <connector> test-compile failsafe:integration-test failsafe:verify -Dit.test=XxxConnectorIT -DskipITs=false -o`；连接配置经 `-Dconnector.it.*` 或 `CONNECTOR_IT_*` 注入，敏感信息不入库。
+5. **执行方式**：`mvn -pl <connector> test-compile failsafe:integration-test failsafe:verify -Dit.test=XxxConnectorIT -DskipITs=false -o`；连接配置经 `-Dconnector.it.*` 或 `CONNECTOR_IT_*` 注入，敏感信息不入库；
+6. **K 组 codec 用例**：依赖 connector 注册了有效的 codecRegistry；无 codecRegistry 时用例自动跳过（`assumeTrue`）；`TapValueClassResolver` 的期望类集合基于引擎原生契约推导，连接器注册了大量自定义 codec 时可能需要覆写 `expectedTapValueClasses()` 等扩展点；
+7. **外键用例**：需要数据源支持外键约束且旁路验证器支持 `createForeignKeyConstraint`；不支持外键的数据源（MongoDB）相关用例自动跳过；外键用例辅助父表（`_tap_it_fkp_*`）由 tearDown 按前缀兜底清理。

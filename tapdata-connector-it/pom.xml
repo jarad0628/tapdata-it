@@ -11,6 +11,14 @@
     <url>https://tapdata.io</url>
 
     <dependencies>
+        <!-- 共享资产（generator/verifier/schema）：数据生成器、旁路验证器与表规格 -->
+        <dependency>
+            <groupId>io.tapdata</groupId>
+            <artifactId>tapdata-it-common</artifactId>
+            <version>${project.version}</version>
+            <scope>compile</scope>
+        </dependency>
+
         <!-- TapData PDK API -->
         <dependency>
             <groupId>io.tapdata</groupId>

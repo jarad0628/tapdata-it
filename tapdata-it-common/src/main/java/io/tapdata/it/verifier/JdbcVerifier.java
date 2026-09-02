@@ -2,12 +2,16 @@ package io.tapdata.it.verifier;
 
 import io.tapdata.it.schema.TestFieldSpec;
 
+import javax.sql.DataSource;
+import java.io.PrintWriter;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -33,7 +37,8 @@ import java.util.stream.Collectors;
 public class JdbcVerifier implements ConnectorVerifier {
 
     private final Object jdbcContext;
-    private final Object hikariDataSource;
+    /** 旁路连接源：Connector 内部 HikariDataSource，或直连构造器传入的 DataSource */
+    private final Object dataSource;
 
     /**
      * @param jdbcContext Connector 实例中继承 io.tapdata.common.JdbcContext 的成员对象
@@ -43,13 +48,22 @@ public class JdbcVerifier implements ConnectorVerifier {
         try {
             Field field = findField(jdbcContext.getClass(), "hikariDataSource");
             field.setAccessible(true);
-            this.hikariDataSource = field.get(jdbcContext);
+            this.dataSource = field.get(jdbcContext);
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException("Cannot extract hikariDataSource from JdbcContext " + jdbcContext.getClass(), e);
         }
-        if (this.hikariDataSource == null) {
+        if (this.dataSource == null) {
             throw new IllegalStateException("hikariDataSource is null in JdbcContext " + jdbcContext.getClass());
         }
+    }
+
+    /**
+     * 直连构造器：使用传入的 DataSource 作为旁路连接源，不依赖 Connector 实例生命周期。
+     * 用于任务停止/完成后（引擎已销毁任务节点 connector）仍需旁路断言的场景。
+     */
+    public JdbcVerifier(DataSource dataSource) {
+        this.jdbcContext = null;
+        this.dataSource = dataSource;
     }
 
     /** 构造时传入的 JdbcContext 成员（供子类包装复用，跨包可访问） */
@@ -98,10 +112,28 @@ public class JdbcVerifier implements ConnectorVerifier {
         return rows;
     }
 
-    /** 反射获取连接池直连 Connection（不经过 Connector） */
+    @Override
+    public List<Map<String, Object>> selectAll(String table) throws Exception {
+        String sql = "SELECT * FROM " + qualifiedTable(table);
+        List<Map<String, Object>> rows = new ArrayList<>();
+        try (Connection conn = connection(); PreparedStatement ps = conn.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
+            ResultSetMetaData meta = rs.getMetaData();
+            int columnCount = meta.getColumnCount();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (int i = 1; i <= columnCount; i++) {
+                    row.put(meta.getColumnLabel(i), rs.getObject(i));
+                }
+                rows.add(row);
+            }
+        }
+        return rows;
+    }
+
+    /** 反射获取连接源直连 Connection（不经过 Connector） */
     protected Connection connection() throws Exception {
-        Method getConnection = hikariDataSource.getClass().getMethod("getConnection");
-        return (Connection) getConnection.invoke(hikariDataSource);
+        Method getConnection = dataSource.getClass().getMethod("getConnection");
+        return (Connection) getConnection.invoke(dataSource);
     }
 
     @Override
@@ -157,6 +189,54 @@ public class JdbcVerifier implements ConnectorVerifier {
                 throw new RuntimeException(e);
             }
         });
+    }
+
+    @Override
+    public int update(String table, Map<String, Object> setValues, String whereColumn, Object whereValue) throws Exception {
+        if (setValues == null || setValues.isEmpty()) {
+            return 0;
+        }
+        StringBuilder sql = new StringBuilder("UPDATE ").append(qualifiedTable(table)).append(" SET ");
+        List<Object> params = new ArrayList<>();
+        int index = 0;
+        for (Map.Entry<String, Object> entry : setValues.entrySet()) {
+            if (index++ > 0) {
+                sql.append(", ");
+            }
+            sql.append(qualifiedColumn(entry.getKey())).append(" = ?");
+            params.add(jdbcValue(entry.getValue()));
+        }
+        sql.append(" WHERE ").append(qualifiedColumn(whereColumn)).append(" = ?");
+        params.add(jdbcValue(whereValue));
+        final String updateSql = sql.toString();
+        final int[] affected = {0};
+        withAutoCommit(conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(updateSql)) {
+                for (int i = 0; i < params.size(); i++) {
+                    ps.setObject(i + 1, params.get(i));
+                }
+                affected[0] = ps.executeUpdate();
+            } catch (java.sql.SQLException e) {
+                throw new RuntimeException(e);
+            }
+        });
+        return affected[0];
+    }
+
+    @Override
+    public int delete(String table, String whereColumn, Object whereValue) throws Exception {
+        final String sql = "DELETE FROM " + qualifiedTable(table) + " WHERE " + qualifiedColumn(whereColumn) + " = ?";
+        final Object param = jdbcValue(whereValue);
+        final int[] affected = {0};
+        withAutoCommit(conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setObject(1, param);
+                affected[0] = ps.executeUpdate();
+            } catch (java.sql.SQLException e) {
+                throw new RuntimeException(e);
+            }
+        });
+        return affected[0];
     }
 
     /**
@@ -369,5 +449,65 @@ public class JdbcVerifier implements ConnectorVerifier {
             }
         }
         throw new NoSuchFieldException(name + " not found in " + clazz.getName());
+    }
+
+    /**
+     * DriverManager 直连的最小 DataSource：无连接池（断言等低频场景逐次建连），
+     * 供直连构造器 {@link #JdbcVerifier(DataSource)} 使用，不引入额外依赖。
+     */
+    public static class DriverManagerDataSource implements DataSource {
+
+        private final String url;
+        private final String username;
+        private final String password;
+
+        public DriverManagerDataSource(String url, String username, String password) {
+            this.url = url;
+            this.username = username;
+            this.password = password;
+        }
+
+        @Override
+        public Connection getConnection() throws SQLException {
+            return DriverManager.getConnection(url, username, password);
+        }
+
+        @Override
+        public Connection getConnection(String username, String password) throws SQLException {
+            return DriverManager.getConnection(url, username, password);
+        }
+
+        @Override
+        public PrintWriter getLogWriter() {
+            return null;
+        }
+
+        @Override
+        public void setLogWriter(PrintWriter out) {
+        }
+
+        @Override
+        public void setLoginTimeout(int seconds) {
+        }
+
+        @Override
+        public int getLoginTimeout() {
+            return 0;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getLogger("global");
+        }
+
+        @Override
+        public <T> T unwrap(Class<T> iface) throws SQLException {
+            throw new SQLException("DriverManagerDataSource is not a wrapper for " + iface);
+        }
+
+        @Override
+        public boolean isWrapperFor(Class<?> iface) {
+            return false;
+        }
     }
 }

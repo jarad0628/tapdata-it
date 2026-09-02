@@ -42,6 +42,15 @@ public interface ConnectorVerifier {
     List<Map<String, Object>> selectByPk(String table, String pkName, List<Object> pkValues) throws Exception;
 
     /**
+     * 直连对端数据源读取全部行（等价 SELECT *，不经过 Connector）。
+     * 无固定排序要求，调用方按需自行排序比对。
+     *
+     * @param table 表名/集合名
+     * @return 行列表（列名 → 对端原生值；MongoDB 文档含 _id 字段，比对时由调用方忽略）
+     */
+    List<Map<String, Object>> selectAll(String table) throws Exception;
+
+    /**
      * 直连对端数据源建表（等价 CREATE TABLE，不经过 Connector 的 createTableV2）。
      *
      * @param table  表名/集合名
@@ -56,6 +65,29 @@ public interface ConnectorVerifier {
      * @param rows  行列表（列名 → 值，首行的列序作为插入列序）
      */
     void insert(String table, List<Map<String, Object>> rows) throws Exception;
+
+    /**
+     * 直连对端数据源按条件更新行（等价 UPDATE ... SET ... WHERE column = value，
+     * 旁路准备增量 DML 事件，不经过 Connector 的 writeRecord）。
+     *
+     * @param table       表名/集合名
+     * @param setValues   待更新列（列名 → 新值）
+     * @param whereColumn 条件列名（通常为主键）
+     * @param whereValue  条件值
+     * @return 影响行数（MongoDB 返回 matched 行数）
+     */
+    int update(String table, Map<String, Object> setValues, String whereColumn, Object whereValue) throws Exception;
+
+    /**
+     * 直连对端数据源按条件删除行（等价 DELETE WHERE column = value，
+     * 旁路准备增量 DML 事件，不经过 Connector 的 writeRecord）。
+     *
+     * @param table       表名/集合名
+     * @param whereColumn 条件列名（通常为主键）
+     * @param whereValue  条件值
+     * @return 影响行数
+     */
+    int delete(String table, String whereColumn, Object whereValue) throws Exception;
 
     /**
      * 直连对端数据源判断表是否存在（旁路锚点：DDL 被测动作是否真实生效）。
