@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>io.tapdata</groupId>
+        <artifactId>tapdata-it</artifactId>
+        <version>1.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>tapdata-it-common</artifactId>
+    <name>TapData Integration Testing Common</name>
+    <url>https://tapdata.io</url>
+    <description>集成测试共享资产：数据生成器（generator）、旁路验证器（verifier）与表规格（schema）。
+        供 tapdata-connector-it（连接器 IT）与 iengine-app IT（引擎 IT）复用。</description>
+
+    <dependencies>
+        <!-- TapData PDK API：verifier 依赖 DataMap / TapConnector 类型 -->
+        <dependency>
+            <groupId>io.tapdata</groupId>
+            <artifactId>tapdata-api</artifactId>
+            <version>${tapdata.pdk.api.version}</version>
+            <scope>compile</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.tapdata</groupId>
+            <artifactId>tapdata-pdk-api</artifactId>
+            <version>${tapdata.pdk.api.version}</version>
+            <scope>compile</scope>
+        </dependency>
+        <!-- IT 直连 MySQL 预置/断言源库数据的 JDBC 驱动（共享给各 IT 模块；必须是 compile scope：
+             Maven scope 矩阵中 test-scope 传递依赖不会传递给使用方，只有 compile 才会随
+             使用方的依赖声明（无论 compile/test）进入其 classpath）。
+             显式写新坐标 + 版本：旧坐标（mysql:mysql-connector-java）会被使用方的
+             dependencyManagement（如引擎侧 Spring Boot BOM）做 relocation 映射，行为不直观。
+             驱动不含 io.tapdata 包，不污染 ClassScanner；使用方仅需标准 java.sql -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>8.0.33</version>
+        </dependency>
+        <!-- 连接配置 JSON 解析（ConnectionConfigLoader） -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+            <scope>compile</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <source>9</source>
+                    <target>9</target>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

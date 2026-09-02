@@ -1022,36 +1022,18 @@ public abstract class ConnectorIT {
 
     // ===================== 连接配置读取工具 =====================
 
-    /** 读取连接配置 JSON（classpath 优先，其次文件系统），键名对齐 Connector spec.json 连接表单字段 */
+    /**
+     * 读取连接配置 JSON（classpath 优先，其次文件系统），键名对齐 Connector spec.json 连接表单字段。
+     * <p>
+     * 配置加载已委托给 {@link io.tapdata.it.config.ConnectionConfigLoader}，支持：
+     * <ol>
+     *   <li>本地 JSON 文件（classpath 或文件系统）</li>
+     *   <li>外部接口配置（CONNECTOR_IT_CONFIG_URL / -Dconnector.it.config.url）</li>
+     *   <li>环境变量 CONNECTOR_IT_&lt;KEY&gt; 或系统属性 -Dconnector.it.&lt;key&gt; 逐项覆盖</li>
+     * </ol>
+     */
     protected static DataMap readConnectionConfig(String path) throws IOException {
-        InputStream in = Thread.currentThread().getContextClassLoader().getResourceAsStream(path);
-        if (in == null) {
-            in = new FileInputStream(path);
-        }
-        String json;
-        try (InputStream resource = in) {
-            json = new String(resource.readAllBytes(), StandardCharsets.UTF_8);
-        }
-        Map<String, Object> map = new ObjectMapper().readValue(json, new TypeReference<Map<String, Object>>() {
-        });
-        DataMap config = DataMap.create();
-        if (map != null) {
-            config.putAll(map);
-        }
-        // 环境变量/系统属性覆盖敏感配置：CONNECTOR_IT_XXX 或 -Dconnector.it.xxx
-        for (Map.Entry<String, Object> entry : config.entrySet()) {
-            String key = entry.getKey();
-            String sysProp = System.getProperty("connector.it." + key);
-            if (sysProp != null) {
-                config.put(key, sysProp);
-                continue;
-            }
-            String env = System.getenv("CONNECTOR_IT_" + key.toUpperCase());
-            if (env != null) {
-                config.put(key, env);
-            }
-        }
-        return config;
+        return io.tapdata.it.config.ConnectionConfigLoader.load(path);
     }
 
     /**
